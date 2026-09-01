@@ -64,6 +64,11 @@ async function activeTab() {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === 'START_RUN') {
     (async () => {
+      const { extractorRun: existing } = await chrome.storage.local.get('extractorRun');
+      if (existing?.active) {
+        sendResponse({ ok: false, error: 'A run is already active. Stop it before starting a new one.' });
+        return;
+      }
       const state = initialState(message.config);
       await chrome.storage.local.set({ extractorRun: state });
       const tab = await activeTab();
@@ -75,8 +80,28 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === 'DOWNLOAD_CSV') {
+    // Downloads run from the worker so the popup closing cannot abort them; a
+    // data: URL is self-contained, unlike a popup-owned blob: URL.
+    (async () => {
+      await chrome.downloads.download({
+        url: message.dataUrl,
+        filename: message.filename || 'google_maps_export.csv',
+        saveAs: true
+      });
+      sendResponse({ ok: true });
+    })().catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
   if (message?.type === 'STOP_RUN') {
     (async () => {
+      // Abort the content controller first so no in-flight saveRun can land
+      // after the stopped state is written and resurrect a dead run.
+      const tabs = await chrome.tabs.query({ url: 'https://www.google.com/maps/*' });
+      await Promise.all(tabs.map((tab) => tab.id
+        ? chrome.tabs.sendMessage(tab.id, { type: 'STOP_RUN' }).catch(() => undefined)
+        : undefined));
       const { extractorRun } = await chrome.storage.local.get('extractorRun');
       if (extractorRun) {
         extractorRun.active = false;
@@ -86,10 +111,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         extractorRun.message = 'Stopped by user. Collected results remain exportable.';
         await chrome.storage.local.set({ extractorRun });
       }
-      const tabs = await chrome.tabs.query({ url: 'https://www.google.com/maps/*' });
-      await Promise.all(tabs.map((tab) => tab.id
-        ? chrome.tabs.sendMessage(tab.id, { type: 'STOP_RUN' }).catch(() => undefined)
-        : undefined));
       sendResponse({ ok: true });
     })().catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;

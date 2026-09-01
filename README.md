@@ -16,17 +16,17 @@ No build step or dependency installation is required for the extension. Node.js 
 
 ## Use
 
-1. Open the extension popup from any Chrome tab.
-2. Choose **City & country** or **Coordinates & radius** coverage.
-3. Add one search term per line, or click the curated presets (**Core**, **Extended**, **Long tail**, **Civic**). Presets are trimmed so overlapping categories ("doctors"/"clinics", "hair salons"/"beauty salons") are represented by a single term, and each click only adds terms not already listed. Terms run serially in the displayed order, up to 50 per run.
-4. In city mode choose a coverage strategy. **Adaptive scan** creates an overlapping initial grid and subdivides cells returning at least 40 cards, up to the selected 50/100/200-job budget.
-5. Choose a base cooldown between term searches. The default is 30 seconds; each actual cooldown is randomized up to +50%, and after every 8 searches the queue rests roughly six times longer so the request pattern does not look machine-timed. The plan summary warns when a plan exceeds roughly 60 or 120 searches — split large plans across sessions or days instead of raising the pace.
-6. Keep **Exclude sponsored results** enabled unless ads should be included.
-7. Leave **Open place pages for missing details** off for a card-only run, or enable it to visit each unique place at most once after all search jobs finish.
-8. Select **Start scheduled extraction**. City mode first asks the normal Maps website to resolve the city center and overview zoom, then derives an approximate rectangular viewport boundary.
-9. Leave the Maps tab open while the run proceeds. Reopen the popup at any time to see the resolved area, cell/depth, countdown, dynamic job count, totals, or stop the run.
+The popup ("Atlas") has three tabs — **Plan**, **Run**, **Results** — and a mandatory estimate review between planning and starting. Every technical concept has an ⓘ info icon; hover or click it for a plain-English explanation. The UI follows your system light/dark theme.
 
-The popup may be closed without losing the run or the unsubmitted values typed into its form. Draft inputs and run state are kept in `chrome.storage.local`, and all processing stays in the browser. **Clear results** removes persisted run data after the run has stopped but leaves the form draft intact.
+1. **Plan** — choose **City & country** or **Coordinates & radius** coverage. Add one search term per line, or click the curated presets (**Core**, **Extended**, **Long tail**, **Civic**). Presets are trimmed so overlapping categories ("doctors"/"clinics", "hair salons"/"beauty salons") are represented by a single term, and each click only adds terms not already listed. Terms run serially in the displayed order, up to 50 per run.
+2. In city mode choose a coverage strategy. **Adaptive scan** creates an overlapping initial grid and subdivides cells returning at least 40 cards, up to the selected 50/100/200-job budget.
+3. Choose a base cooldown. The default is 30 seconds; each actual cooldown is randomized up to +50%, and after every 8 searches the queue rests roughly six times longer so the request pattern does not look machine-timed. The sticky plan-summary rail shows a live duration estimate and a risk pill as you type.
+4. Select **Review plan →**. The review screen prints an itemized receipt — searches, cooldowns, rest breaks, adaptive-refinement ceiling, open-ended enrichment — with a total time range, an expected finish clock, a three-segment risk meter (with a one-click "slow the pace" fix), and the full ordered itinerary.
+5. Select **Confirm & start** (the button shows the estimate it commits you to). City mode first asks the normal Maps website to resolve the city center and overview zoom, then derives an approximate rectangular viewport boundary.
+6. **Run** — watch the live stage, job progress, countdown to the next search, and stats. The compass mascot doubles as the cooldown timer: its ring depletes second by second. Stop at any time; collected data is kept.
+7. **Results** — an outcome receipt (cards → duplicates merged → outside coverage → unique kept), a per-term breakdown, and **Export CSV**. Clearing results asks for a second click before deleting.
+
+The popup may be closed without losing anything: drafts, the staged review, and run state live in `chrome.storage.local`, and the popup reconstructs the right view on reopen — mid-cooldown countdowns included. **Clear results** removes persisted run data after the run has stopped but leaves the form draft intact.
 
 Card status and amenity extraction never causes extra page visits. Popular times is explicitly marked unsupported and disabled.
 

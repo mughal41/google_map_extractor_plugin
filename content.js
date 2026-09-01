@@ -97,11 +97,12 @@ async function startContentController() {
   const logger = new Logger(state.config?.debug);
   const block = isBlockingPage(document);
   if (block) {
-    await failRun(
-      state, block,
-      'Google Maps is showing a block or consent page. The queue stopped without retrying.',
-      logger
-    );
+    const blockMessage = block === 'ACCESS_BLOCKED'
+      ? 'Google is showing a CAPTCHA or unusual-traffic check. Solve it in the Maps tab, then start a smaller or slower plan — everything collected so far is saved under Results.'
+      : block === 'CONSENT_REQUIRED'
+        ? 'Google is showing its consent page. Accept or dismiss it in the Maps tab, then start the run again.'
+        : 'Google Maps is showing a block or consent page. The queue stopped without retrying.';
+    await failRun(state, block, blockMessage, logger);
     return;
   }
 
@@ -323,6 +324,7 @@ async function finishSearchJob(state, logger, signal) {
   const { cooldownMs, longRest } = cooldownAfterJob(baseCooldownMs(state.config), state.jobsCompleted);
   const cooldownSeconds = Math.round(cooldownMs / 1000);
   state.stage = 'waiting_between_jobs';
+  state.cooldownTotalMs = cooldownMs;
   state.nextRunAt = new Date(Date.now() + cooldownMs).toISOString();
   state.message = longRest
     ? `${state.jobsCompleted} searches done — taking a longer ${cooldownSeconds}-second rest to keep a natural pace, then ${describeJob(nextJob)}.`
@@ -379,8 +381,13 @@ async function finishBatchDiscovery(state, logger, signal) {
 
   const unique = deduplicateRecords(state.records || []);
   const accepted = [];
+  state.sponsoredExcluded = 0;
+  state.missingCoordinates = 0;
   for (const record of unique) {
-    if (state.config.exclude_sponsored && record.g_is_ad === true) continue;
+    if (state.config.exclude_sponsored && record.g_is_ad === true) {
+      state.sponsoredExcluded += 1;
+      continue;
+    }
     if (state.config.location_mode === 'city') {
       if (Number.isFinite(record.g_lat) && Number.isFinite(record.g_lng) &&
           !insideBounds(record.g_lat, record.g_lng, state.coverageBounds, 0.005)) {
@@ -393,6 +400,7 @@ async function finishBatchDiscovery(state, logger, signal) {
     }
     const result = isInsideRadius(record, state.config, state.config.radius_tolerance_m || 0);
     if (result.distance === null) {
+      state.missingCoordinates += 1;
       state.errors.push({ place_id: record.g_place_id, stage: 'filtering', error: 'MISSING_COORDINATES' });
       logger.warn('MISSING_COORDINATES', { placeId: record.g_place_id });
       continue;

@@ -1,6 +1,9 @@
 import { csvFilename, recordsToCsv } from './lib/csv.js';
+import { formatClock, planEstimate } from './lib/estimate.js';
+import { GLOSSARY } from './lib/glossary.js';
 import { normalizeTerms } from './lib/location.js';
-import { estimatedCooldownTotalMs } from './lib/pacing.js';
+import { LONG_REST_MULTIPLIER } from './lib/pacing.js';
+import { initPopovers } from './lib/popover.js';
 import { MAX_TERMS, TERM_PRESETS } from './lib/presets.js';
 
 const $ = (id) => document.getElementById(id);
@@ -11,7 +14,7 @@ const STAGE_LABELS = {
   resolving_location: 'Resolving location',
   opening_search: 'Opening search',
   searching: 'Collecting cards',
-  waiting_between_jobs: 'Scheduled cooldown',
+  waiting_between_jobs: 'Cooling down',
   filtering: 'Merging results',
   enriching: 'Enriching details',
   complete: 'Complete',
@@ -19,15 +22,38 @@ const STAGE_LABELS = {
   error: 'Needs attention',
   idle: 'Idle'
 };
-let lastState = null;
+const VIEWS = ['plan', 'review', 'run', 'results'];
+const TABS = ['plan', 'run', 'results'];
+
+let lastRun = null;
+let uiState = { tab: 'plan', view: null };
+let lastAnnouncedStage = null;
+let clearArmedUntil = 0;
+
+/* ---------- formatting ---------- */
+
+function fmtMMSS(milliseconds) {
+  const total = Math.max(0, Math.round(milliseconds / 1000));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours) return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function fmtCountdown(milliseconds) {
+  return fmtMMSS(milliseconds);
+}
+
+/* ---------- form <-> config ---------- */
+
+function locationMode() {
+  return document.querySelector('input[name="location-mode"]:checked')?.value || 'city';
+}
 
 function numericValue(id) {
   const value = $(id).value.trim();
   return value === '' ? Number.NaN : Number(value);
-}
-
-function locationMode() {
-  return document.querySelector('input[name="location-mode"]:checked')?.value || 'city';
 }
 
 function termsFromForm() {
@@ -59,6 +85,27 @@ function readConfig() {
     radius_tolerance_m: 0
   };
 }
+
+function validate(config) {
+  if (config.location_mode === 'city') {
+    if (!config.country) return 'Enter or select a country.';
+    if (!config.city) return 'Enter a city.';
+  } else {
+    if (!Number.isFinite(config.lat) || config.lat < -90 || config.lat > 90) return 'Enter a valid latitude.';
+    if (!Number.isFinite(config.lng) || config.lng < -180 || config.lng > 180) return 'Enter a valid longitude.';
+    if (!Number.isFinite(config.radius_m) || config.radius_m < 1 || config.radius_m > 100000) {
+      return 'Radius must be between 1 and 100,000 meters.';
+    }
+  }
+  if (!config.terms.length) return 'Add at least one search term.';
+  if (config.terms.length > MAX_TERMS) return `Use no more than ${MAX_TERMS} search terms in one run.`;
+  if (config.location_mode === 'city' && (!Number.isInteger(config.max_search_jobs) || config.max_search_jobs < 1)) {
+    return 'Choose a valid maximum search-job budget.';
+  }
+  return null;
+}
+
+/* ---------- draft persistence ---------- */
 
 function readDraft() {
   return {
@@ -114,99 +161,225 @@ function localDraft() {
   try { return JSON.parse(localStorage.getItem('extractorDraft')); } catch { return null; }
 }
 
-function formatDuration(milliseconds) {
-  const seconds = Math.max(0, Math.ceil(milliseconds / 1000));
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
+function persistUi() {
+  localStorage.setItem('extractorUi', JSON.stringify(uiState));
+  chrome.storage.local.set({ extractorUi: uiState }).catch(() => undefined);
 }
 
-function updatePlanWarning(plannedJobs, ceiling) {
-  const warning = $('plan-warning');
-  const worst = Math.max(plannedJobs, ceiling || 0);
-  if (worst > 120) {
-    warning.textContent = `This plan can reach ${worst} searches in one sitting, which is the range where Google starts showing CAPTCHAs. Split it: run the Core preset today and the remaining terms as a separate plan tomorrow, or lower the job budget.`;
-  } else if (worst > 60) {
-    warning.textContent = `Heads up: up to ${worst} searches in one run. That is usually fine at the recommended cooldown, but if Maps shows a CAPTCHA, finish it manually and continue with smaller plans spread over the day.`;
+function localUi() {
+  try { return JSON.parse(localStorage.getItem('extractorUi')) || {}; } catch { return {}; }
+}
+
+/* ---------- Pip the compass ---------- */
+
+function mountPips() {
+  const template = $('pip-template');
+  for (const slot of document.querySelectorAll('.pip')) {
+    slot.append(template.content.cloneNode(true));
+  }
+}
+
+function setPipStage(stage) {
+  $('pip-topbar').dataset.stage = stage;
+  const runPip = $('pip-run');
+  if (runPip) runPip.dataset.stage = stage;
+}
+
+function updateCountdownRing(pip, remainingMs, totalMs) {
+  const ring = pip.querySelector('.p-ring');
+  if (!ring) return;
+  if (remainingMs === null || !totalMs) {
+    pip.dataset.countdown = '0';
+    ring.style.strokeDashoffset = '0';
+    return;
+  }
+  pip.dataset.countdown = '1';
+  const fraction = Math.min(1, Math.max(0, remainingMs / totalMs));
+  ring.style.strokeDashoffset = String(Math.round((1 - fraction) * 100));
+}
+
+/* ---------- view routing ---------- */
+
+function showView(name, { focus = false, persist = true } = {}) {
+  if (!VIEWS.includes(name)) name = 'plan';
+  for (const view of VIEWS) $(`view-${view}`).hidden = view !== name;
+  const tab = name === 'review' ? 'plan' : name;
+  for (const t of TABS) {
+    const button = $(`tab-${t}`);
+    const selected = t === tab;
+    button.setAttribute('aria-selected', selected ? 'true' : 'false');
+    button.tabIndex = selected ? 0 : -1;
+  }
+  uiState = { ...uiState, tab, view: name === 'review' ? 'review' : null };
+  if (persist) persistUi();
+  if (name === 'review') renderReview();
+  if (focus) $(`view-${name}`).focus({ preventScroll: true });
+}
+
+function routeOnLoad(run) {
+  if (run?.active) return 'run';
+  if (uiState.view === 'review') return 'review';
+  if (run?.records?.length && (run.stage === 'complete' || run.stage === 'stopped' || run.stage === 'error')) return 'results';
+  if (uiState.tab && TABS.includes(uiState.tab)) return uiState.tab;
+  return 'plan';
+}
+
+/* ---------- plan rail ---------- */
+
+function areaText() {
+  if (locationMode() === 'city') {
+    const city = $('city').value.trim();
+    const country = $('country').value.trim();
+    return city || country ? [city, country].filter(Boolean).join(', ') : '—';
+  }
+  const lat = $('latitude').value.trim();
+  const lng = $('longitude').value.trim();
+  return lat && lng ? `${lat}, ${lng} · ${$('radius').value || 0} m` : '—';
+}
+
+const RISK_COPY = {
+  low: { label: 'Low risk', text: 'A comfortable pace, well inside what Maps tolerates.' },
+  elevated: { label: 'Elevated risk', text: 'Over 60 searches raises the odds Maps slows you down. Lower the job budget or switch to City search.' },
+  high: { label: 'High risk', text: 'Beyond ~120 searches is CAPTCHA territory. Lower the job budget, or split this plan across sessions or days.' }
+};
+
+function updateRail() {
+  const config = readConfig();
+  const estimate = planEstimate(config);
+  $('rail-area').textContent = areaText();
+  $('rail-area').title = $('rail-area').textContent;
+  $('rail-jobs').textContent = estimate.jobs
+    ? `${estimate.jobs}${estimate.ceiling > estimate.jobs ? ` (≤ ${estimate.ceiling})` : ''}`
+    : '—';
+  $('rail-cooldown').textContent = `${Math.round((config.term_delay_ms || 30000) / 1000)} s + jitter`;
+  $('rail-duration').textContent = estimate.jobs ? `~${formatClock(estimate.typicalMs)}` : '—';
+  $('rail-range').textContent = estimate.jobs
+    ? `${formatClock(estimate.minMs)} – ${formatClock(estimate.maxMs)} with jitter`
+    : 'Add search terms to see the estimate.';
+  const pill = $('rail-risk');
+  if (estimate.jobs && estimate.risk !== 'low') {
+    pill.hidden = false;
+    pill.dataset.risk = estimate.risk;
+    pill.textContent = `${RISK_COPY[estimate.risk].label}: up to ${estimate.ceiling} searches. ${RISK_COPY[estimate.risk].text}`;
   } else {
-    warning.textContent = '';
+    pill.hidden = true;
   }
-  warning.hidden = !warning.textContent;
-}
-
-function updatePlanSummary() {
-  const terms = termsFromForm();
-  const delay = Number($('term-delay').value) || 30000;
-  $('term-count').textContent = `${terms.length} / ${MAX_TERMS} terms`;
-  $('term-count').classList.toggle('at-limit', terms.length >= MAX_TERMS);
-  if (!terms.length) {
-    $('plan-summary').textContent = 'Add search terms to calculate the run plan.';
-    updatePlanWarning(0, 0);
-    return;
-  }
-  const cityMode = locationMode() === 'city';
-  if (!cityMode) {
-    const cooldown = estimatedCooldownTotalMs(terms.length, delay);
-    const baseline = terms.length * 45000 + cooldown;
-    $('plan-summary').textContent = `${terms.length} radius-filtered searches, one per term · about ${formatDuration(baseline)} total including randomized cooldowns, before optional detail visits.`;
-    updatePlanWarning(terms.length, terms.length);
-    return;
-  }
-  const coverage = $('coverage-mode').value;
-  const budget = Number($('max-search-jobs').value) || 100;
-  const cellsBudget = Math.max(1, Math.floor(budget / terms.length));
-  const dimension = coverage === 'city' ? 1 : cellsBudget >= 9 ? 3 : cellsBudget >= 4 ? 2 : 1;
-  const initialJobs = Math.min(budget, terms.length * dimension * dimension);
-  const cooldown = estimatedCooldownTotalMs(initialJobs, delay);
-  const baseline = initialJobs * 45000 + cooldown;
-  const shape = dimension === 1 ? 'one search per term' : `${dimension}×${dimension} map cells per term`;
-  const refinement = coverage === 'adaptive' ? ` Dense areas may add refinements up to the ${budget}-job ceiling.` : '';
-  $('plan-summary').textContent = `${initialJobs} initial searches (${shape}) · about ${formatDuration(baseline)} including randomized cooldowns and rest breaks.${refinement}`;
-  updatePlanWarning(initialJobs, coverage === 'adaptive' ? budget : initialJobs);
+  $('term-count').childNodes[0].textContent = `${config.terms.length} / ${MAX_TERMS} terms `;
+  $('term-count').classList.toggle('at-limit', config.terms.length >= MAX_TERMS);
 }
 
 function syncForm() {
   const cityMode = locationMode() === 'city';
   $('city-fields').hidden = !cityMode;
   $('coordinate-fields').hidden = cityMode;
-  for (const input of $('city-fields').querySelectorAll('input')) input.disabled = !cityMode;
+  for (const input of $('city-fields').querySelectorAll('input, select')) input.disabled = !cityMode;
   for (const input of $('coordinate-fields').querySelectorAll('input')) input.disabled = cityMode;
-  updatePlanSummary();
+  const strategyInfo = $('strategy-info');
+  const strategyKey = `coverage-${$('coverage-mode').value}`;
+  if (strategyInfo.dataset.info !== strategyKey && GLOSSARY[strategyKey]) {
+    strategyInfo.dataset.info = strategyKey;
+    strategyInfo.setAttribute('aria-label', `About: ${GLOSSARY[strategyKey].title}`);
+  }
+  updateRail();
 }
 
-function validate(config) {
-  if (config.location_mode === 'city') {
-    if (!config.country) return 'Enter or select a country.';
-    if (!config.city) return 'Enter a city.';
-  } else {
-    if (!Number.isFinite(config.lat) || config.lat < -90 || config.lat > 90) return 'Enter a valid latitude.';
-    if (!Number.isFinite(config.lng) || config.lng < -180 || config.lng > 180) return 'Enter a valid longitude.';
-    if (!Number.isFinite(config.radius_m) || config.radius_m < 1 || config.radius_m > 100000) {
-      return 'Radius must be between 1 and 100,000 meters.';
-    }
+/* ---------- review (estimate & confirm) ---------- */
+
+function receiptRow({ label, note, value, cls }) {
+  const row = document.createElement('p');
+  row.className = `receipt-row${cls ? ` ${cls}` : ''}`;
+  const left = document.createElement('span');
+  left.textContent = label;
+  if (note) {
+    const small = document.createElement('span');
+    small.className = 'row-note';
+    small.textContent = ` ${note}`;
+    left.append(small);
   }
-  if (!config.terms.length) return 'Add at least one search term.';
-  if (config.terms.length > MAX_TERMS) return `Use no more than ${MAX_TERMS} search terms in one run.`;
-  if (config.location_mode === 'city' && (!Number.isInteger(config.max_search_jobs) || config.max_search_jobs < 1)) {
-    return 'Choose a valid maximum search-job budget.';
-  }
-  return null;
+  const leader = document.createElement('i');
+  const right = document.createElement('span');
+  right.className = 'mono';
+  right.textContent = value;
+  row.append(left, leader, right);
+  return row;
 }
 
-function resolvedAreaText(state) {
-  const location = state?.resolvedLocation;
-  if (!location) return state?.config?.location_mode === 'city' ? 'Resolving in Maps…' : 'Waiting…';
-  const coordinates = Number.isFinite(location.lat) && Number.isFinite(location.lng)
-    ? ` · ${location.lat.toFixed(4)}, ${location.lng.toFixed(4)}` : '';
-  const zoom = Number.isFinite(location.zoom) ? ` · ${location.zoom}z` : '';
-  return `${location.label || 'Resolved'}${coordinates}${zoom}`;
+function renderReview() {
+  const config = readConfig();
+  const estimate = planEstimate(config);
+  const base = Math.max(5000, Number(config.term_delay_ms) || 30000);
+  const gaps = Math.max(0, estimate.jobs - 1);
+  const rests = Math.floor(gaps / 8);
+
+  $('review-title').textContent = config.location_mode === 'city'
+    ? [config.city, config.country].filter(Boolean).join(', ') || 'City plan'
+    : `${config.lat}, ${config.lng} · ${config.radius_m} m radius`;
+  const strategy = { city: 'City search', grid: 'Grid scan', adaptive: 'Adaptive scan', radius: 'Radius search' }[config.coverage_mode] || config.coverage_mode;
+  $('review-sub').textContent = config.location_mode === 'city'
+    ? `${strategy} · ${estimate.termCount} terms · ${estimate.dimension > 1 ? `${estimate.dimension}×${estimate.dimension} cells per term` : 'one search per term'}`
+    : `${strategy} · ${estimate.termCount} terms · one search per term`;
+
+  $('est-hero').textContent = `~${formatClock(estimate.typicalMs)}`;
+  $('est-range').textContent = `${formatClock(estimate.minMs)} – ${formatClock(estimate.maxMs)} with jitter`;
+  const finish = new Date(Date.now() + estimate.typicalMs);
+  $('est-finish').textContent = `Done around ${finish.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · cooldowns are deliberately randomized, so the total is a range, not a promise.`;
+
+  const rows = $('receipt-rows');
+  rows.innerHTML = '';
+  rows.append(receiptRow({
+    label: 'Searches', note: `${estimate.jobs} × 30–70 s`,
+    value: `${fmtMMSS(estimate.searchMinMs)}–${fmtMMSS(estimate.searchMaxMs)}`
+  }));
+  rows.append(receiptRow({
+    label: 'Cooldowns', note: `${gaps} × ${Math.round(base / 1000)} s + jitter`,
+    value: `${fmtMMSS(estimate.cooldownMinMs)}–${fmtMMSS(estimate.cooldownMaxMs)}`
+  }));
+  if (rests > 0) {
+    rows.append(receiptRow({
+      label: 'Rest breaks', note: `every 8 searches, ${rests} × ${fmtMMSS(base * LONG_REST_MULTIPLIER)}`,
+      value: fmtMMSS(estimate.restMs)
+    }));
+  }
+  if (estimate.ceiling > estimate.jobs) {
+    rows.append(receiptRow({
+      label: 'Adaptive refinements', note: 'dense areas only · can extend the total', value: `≤ ${estimate.ceiling} jobs`, cls: 'open-ended'
+    }));
+  }
+  if (estimate.enrichment) {
+    rows.append(receiptRow({
+      label: 'Enrichment', note: '~9 s per incomplete place, after collection', value: '+ variable', cls: 'open-ended'
+    }));
+  }
+  rows.append(receiptRow({
+    label: 'Estimated total', value: `${formatClock(estimate.minMs)} – ${formatClock(estimate.maxMs)}`, cls: 'total'
+  }));
+
+  $('risk-meter').dataset.risk = estimate.risk;
+  $('risk-label').textContent = RISK_COPY[estimate.risk].label;
+  $('risk-text').textContent = ` ${RISK_COPY[estimate.risk].text}`;
+  const action = $('risk-action');
+  action.hidden = !(estimate.risk !== 'low' && config.location_mode === 'city' && Number($('max-search-jobs').value) > 50);
+
+  $('itinerary-summary').textContent = `Itinerary · ${estimate.termCount} terms in order`;
+  const list = $('itinerary-list');
+  list.innerHTML = '';
+  for (const term of config.terms) {
+    const item = document.createElement('li');
+    item.textContent = term;
+    list.append(item);
+  }
+
+  $('confirm-start').textContent = `Confirm & start · ~${formatClock(estimate.typicalMs)}`;
+  $('confirm-start').disabled = Boolean(lastRun?.active);
+  $('confirm-error').textContent = '';
 }
+
+/* ---------- run view ---------- */
 
 function nextActionText(state) {
   if (state?.nextRunAt) {
     const remaining = new Date(state.nextRunAt).getTime() - Date.now();
-    return remaining > 0 ? `Next search in ${formatDuration(remaining)}` : 'Opening next search…';
+    return remaining > 0 ? `Next search in ${fmtCountdown(remaining)}` : 'Opening next search…';
   }
   if (state?.stage === 'resolving_location') return 'Waiting for Maps center and zoom';
   if (state?.stage === 'enriching') return `Detail ${Math.min((state.detailIndex || 0) + 1, state.records?.length || 0)} of ${state.records?.length || 0}`;
@@ -214,55 +387,185 @@ function nextActionText(state) {
   return state?.active ? 'Working in one Maps tab' : '—';
 }
 
-function render(state) {
-  lastState = state || null;
-  const stage = state?.stage || 'idle';
-  const jobs = state?.jobs || [];
-  const currentJob = jobs[state?.currentJobIndex] || null;
-  const completeJobs = state?.jobsCompleted ?? jobs.filter((job) => job.status === 'complete').length;
-  const active = activeStages.has(stage) && state?.active;
+function resolvedAreaText(state) {
+  const location = state?.resolvedLocation;
+  if (!location) return state?.config?.location_mode === 'city' ? 'Resolving in Maps…' : 'Waiting…';
+  const coordinates = Number.isFinite(location.lat) && Number.isFinite(location.lng)
+    ? ` · ${location.lat.toFixed(4)}, ${location.lng.toFixed(4)}` : '';
+  return `${location.label || 'Resolved'}${coordinates}`;
+}
+
+function renderRun(state) {
+  const hasRun = Boolean(state);
+  $('run-empty').hidden = hasRun;
+  $('run-live').hidden = !hasRun;
+  if (!hasRun) return;
+
+  const stage = state.stage || 'idle';
+  const jobs = state.jobs || [];
+  const currentJob = jobs[state.currentJobIndex] || null;
+  const completeJobs = state.jobsCompleted ?? jobs.filter((job) => job.status === 'complete').length;
+  const active = activeStages.has(stage) && state.active;
+
   $('stage').textContent = STAGE_LABELS[stage] || stage.replaceAll('_', ' ');
-  $('message').textContent = state?.message || 'Ready to build a search plan.';
-  $('discovered').textContent = state?.discovered ?? 0;
-  $('unique').textContent = state?.unique ?? 0;
-  $('inside').textContent = state?.insideRadius ?? 0;
-  $('jobs').textContent = `${completeJobs} / ${jobs.length}`;
-  $('errors').textContent = state?.errors?.length ?? 0;
-  $('coverage-label').textContent = state?.config?.location_mode === 'coordinates' ? 'Inside radius' : 'Accepted';
-  $('stage-dot').className = active ? 'active' : stage === 'error' ? 'error' : '';
-  $('stop').disabled = !active;
-  $('start').disabled = active;
-  $('export').disabled = !state?.records?.length;
-  $('run-plan').hidden = jobs.length === 0;
   $('job-badge').hidden = jobs.length === 0;
-  $('job-badge').textContent = `${completeJobs} / ${jobs.length} jobs`;
+  $('job-badge').textContent = `${completeJobs} / ${jobs.length}`;
+  $('next-action-line').textContent = nextActionText(state);
+  $('message').textContent = state.message || '';
+
+  const percent = jobs.length ? Math.round((completeJobs / jobs.length) * 100) : 0;
+  $('progress-bar').style.width = `${percent}%`;
+  const progress = $('progress');
+  progress.setAttribute('aria-valuenow', String(percent));
+  progress.setAttribute('aria-valuetext', `Job ${Math.min(completeJobs + 1, jobs.length)} of ${jobs.length}`);
+
   $('resolved-area').textContent = resolvedAreaText(state);
+  $('resolved-area').title = $('resolved-area').textContent;
   $('current-term').textContent = currentJob
-    ? `${state.currentJobIndex + 1}. ${currentJob.term}${currentJob.cell ? ` · ${currentJob.cell.label} · ${currentJob.cell.zoom}z` : ''}`
+    ? `${state.currentJobIndex + 1}. ${currentJob.term}${currentJob.cell ? ` · ${currentJob.cell.label}` : ''}`
     : 'Preparing queue…';
+  $('current-term').title = $('current-term').textContent;
   $('next-action').textContent = nextActionText(state);
-  $('scan-info').textContent = state?.scan
+  $('scan-info').textContent = state.scan
     ? `${state.scan.mode} · +${state.scan.refinementsAdded || 0} refinements · max ${state.scan.maxJobs}`
-    : state?.config?.coverage_mode || '—';
-  $('progress-bar').style.width = jobs.length ? `${Math.round((completeJobs / jobs.length) * 100)}%` : '0%';
+    : state.config?.coverage_mode || '—';
+
+  $('discovered').textContent = state.discovered ?? 0;
+  $('unique').textContent = state.unique ?? 0;
+  $('inside').textContent = state.insideRadius ?? 0;
+  $('jobs').textContent = `${completeJobs} / ${jobs.length}`;
+  const errorCount = state.errors?.length ?? 0;
+  $('errors').textContent = errorCount;
+  $('errors').classList.toggle('has-errors', errorCount > 0);
+  $('coverage-label').textContent = state.config?.location_mode === 'coordinates' ? 'In radius' : 'Accepted';
+  $('stop').disabled = !active;
+  const gotoResults = $('run-goto-results');
+  gotoResults.hidden = !(stage === 'error' && state.records?.length);
+  if (!gotoResults.hidden) gotoResults.textContent = `View ${state.records.length} collected places →`;
 }
 
-async function loadState() {
-  const { extractorRun } = await chrome.storage.local.get('extractorRun');
-  render(extractorRun);
+/* ---------- results view ---------- */
+
+function aggregateTerms(state) {
+  const byTerm = new Map();
+  for (const job of state.jobs || []) {
+    byTerm.set(job.term, (byTerm.get(job.term) || 0) + (job.added || 0));
+  }
+  return [...byTerm.entries()].filter(([, count]) => count > 0)
+    .sort((a, b) => b[1] - a[1]).slice(0, 8);
 }
 
-$('search-form').addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const config = readConfig();
-  const error = validate(config);
-  $('form-error').textContent = error || '';
-  if (error) return;
-  persistDraft();
-  const response = await chrome.runtime.sendMessage({ type: 'START_RUN', config });
-  if (!response?.ok) $('form-error').textContent = response?.error || 'Could not start the run.';
-  await loadState();
-});
+function renderResults(state) {
+  const hasRecords = Boolean(state?.records?.length);
+  $('results-empty').hidden = hasRecords;
+  $('results-live').hidden = !hasRecords;
+  $('results-badge').hidden = !hasRecords;
+  if (hasRecords) $('results-badge').textContent = String(state.records.length);
+  if (!hasRecords) return;
+
+  const stage = state.stage || 'idle';
+  const finished = stage === 'complete' || stage === 'stopped' || stage === 'error';
+  $('pip-results').dataset.stage = stage === 'complete' ? 'complete' : stage === 'error' ? 'error' : finished ? 'stopped' : 'searching';
+  $('results-headline').textContent = stage === 'complete' ? 'Run complete'
+    : stage === 'stopped' ? 'Run stopped'
+    : stage === 'error' ? 'Run interrupted'
+    : 'Run in progress';
+
+  const jobsDone = state.jobsCompleted ?? 0;
+  const errorCount = state.errors?.length ?? 0;
+  $('results-sub').textContent = `${state.records.length} unique places from ${jobsDone} searches · ${errorCount} error${errorCount === 1 ? '' : 's'}${finished ? '' : ' · still collecting'}`;
+
+  const discovered = state.discovered ?? 0;
+  const uniqueMerged = state.unique ?? state.records.length;
+  const sponsored = state.sponsoredExcluded ?? 0;
+  const noCoords = state.missingCoordinates ?? 0;
+  $('oc-cards').textContent = String(discovered);
+  $('oc-dupes').textContent = String(Math.max(0, discovered - uniqueMerged));
+  $('oc-sponsored-row').hidden = sponsored === 0;
+  $('oc-sponsored').textContent = String(sponsored);
+  $('oc-nocoords-row').hidden = noCoords === 0;
+  $('oc-nocoords').textContent = String(noCoords);
+  $('oc-outside').textContent = String(Math.max(0, uniqueMerged - state.records.length - sponsored - noCoords));
+  $('oc-unique').textContent = String(state.records.length);
+
+  const bars = $('term-bars');
+  bars.innerHTML = '';
+  const top = aggregateTerms(state);
+  const max = top[0]?.[1] || 1;
+  for (const [term, count] of top) {
+    const row = document.createElement('div');
+    row.className = 'term-bar';
+    const label = document.createElement('span');
+    label.className = 'tb-label';
+    label.textContent = term;
+    label.title = term;
+    const track = document.createElement('span');
+    track.className = 'tb-track';
+    const fill = document.createElement('span');
+    fill.className = 'tb-fill';
+    fill.style.width = `${Math.max(4, Math.round((count / max) * 100))}%`;
+    track.append(fill);
+    const value = document.createElement('span');
+    value.className = 'tb-count';
+    value.textContent = String(count);
+    row.append(label, track, value);
+    bars.append(row);
+  }
+  $('term-bars-block').hidden = top.length === 0;
+
+  $('export-label').textContent = `Export CSV · ${state.records.length} rows`;
+  $('export').disabled = !state.records.length;
+}
+
+/* ---------- global render ---------- */
+
+function announce(state) {
+  const stage = state?.stage || 'idle';
+  if (stage === lastAnnouncedStage) return;
+  lastAnnouncedStage = stage;
+  if (stage === 'error') {
+    $('live-alert').textContent = state?.message || 'The run hit an error.';
+  } else if (stage !== 'idle') {
+    $('live-status').textContent = `${STAGE_LABELS[stage] || stage}. ${state?.message || ''}`;
+  }
+}
+
+function renderAll(state) {
+  const wasActive = lastRun?.active;
+  lastRun = state || null;
+  const stage = state?.active ? state.stage : (state?.stage === 'complete' || state?.stage === 'stopped' || state?.stage === 'error') ? state.stage : 'idle';
+  setPipStage(stage || 'idle');
+  $('run-dot').hidden = !state?.active;
+  $('review-btn').disabled = Boolean(state?.active);
+  renderRun(state);
+  renderResults(state);
+  announce(state);
+  tickCountdown();
+  if (wasActive && !state?.active && state?.stage === 'complete' && !$('view-run').hidden) {
+    showView('results', { focus: true });
+  }
+}
+
+/* ---------- countdown ---------- */
+
+function tickCountdown() {
+  const pips = [$('pip-topbar'), $('pip-run')].filter(Boolean);
+  if (lastRun?.nextRunAt && lastRun.stage === 'waiting_between_jobs') {
+    const remaining = new Date(lastRun.nextRunAt).getTime() - Date.now();
+    if (remaining > 0) {
+      const total = Number(lastRun.cooldownTotalMs) || null;
+      $('next-action-line').textContent = `Next search in ${fmtCountdown(remaining)} · pace randomized on purpose`;
+      $('next-action').textContent = `Next search in ${fmtCountdown(remaining)}`;
+      for (const pip of pips) updateCountdownRing(pip, remaining, total);
+      return;
+    }
+    $('next-action-line').textContent = 'Opening next search…';
+    $('next-action').textContent = 'Opening next search…';
+  }
+  for (const pip of pips) updateCountdownRing(pip, null, null);
+}
+
+/* ---------- events ---------- */
 
 function addPresetTerms(preset) {
   const existing = $('terms').value.split(/\n+/).map((line) => line.trim()).filter(Boolean);
@@ -271,67 +574,185 @@ function addPresetTerms(preset) {
   $('form-error').textContent = merged.length > MAX_TERMS
     ? `Kept the first ${MAX_TERMS} terms — one run is capped at ${MAX_TERMS} searches to stay under Google's rate limits. Save the rest for a second plan.`
     : '';
+  $('live-status').textContent = `${preset.label} preset merged. ${normalizeTerms($('terms').value).length} of ${MAX_TERMS} terms.`;
   syncForm();
   persistDraft();
 }
 
-for (const preset of TERM_PRESETS) {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'mini-button';
-  button.textContent = `+ ${preset.label} (${preset.terms.length})`;
-  button.title = preset.description;
-  button.addEventListener('click', () => addPresetTerms(preset));
-  $('preset-row').appendChild(button);
+function setupPlanEvents() {
+  for (const preset of TERM_PRESETS) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'chip';
+    button.textContent = `+ ${preset.label} (${preset.terms.length})`;
+    button.title = preset.description;
+    button.addEventListener('click', () => addPresetTerms(preset));
+    $('preset-row').append(button);
+  }
+
+  $('search-form').addEventListener('input', () => { syncForm(); persistDraft(); });
+  $('search-form').addEventListener('change', () => { syncForm(); persistDraft(); });
+  window.addEventListener('pagehide', persistDraft);
+
+  $('search-form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    const config = readConfig();
+    const error = validate(config);
+    $('form-error').textContent = error || '';
+    if (error) return;
+    persistDraft();
+    showView('review', { focus: true });
+  });
 }
 
-$('search-form').addEventListener('input', () => { syncForm(); persistDraft(); });
-$('search-form').addEventListener('change', () => { syncForm(); persistDraft(); });
-window.addEventListener('pagehide', persistDraft);
+function setupReviewEvents() {
+  $('review-back').addEventListener('click', () => showView('plan', { focus: true }));
+  $('risk-action').addEventListener('click', () => {
+    $('max-search-jobs').value = '50';
+    persistDraft();
+    updateRail();
+    renderReview();
+  });
+  $('confirm-start').addEventListener('click', async () => {
+    const config = readConfig();
+    const error = validate(config);
+    if (error) { $('confirm-error').textContent = error; return; }
+    $('confirm-start').disabled = true;
+    const response = await chrome.runtime.sendMessage({ type: 'START_RUN', config }).catch((err) => ({ ok: false, error: err.message }));
+    if (!response?.ok) {
+      $('confirm-error').textContent = response?.error || 'Could not start the run.';
+      $('confirm-start').disabled = Boolean(lastRun?.active);
+      return;
+    }
+    showView('run', { focus: true });
+  });
+}
 
-$('stop').addEventListener('click', async () => {
-  await chrome.runtime.sendMessage({ type: 'STOP_RUN' });
-  await loadState();
-});
+function setupRunEvents() {
+  $('run-goto-plan').addEventListener('click', () => showView('plan', { focus: true }));
+  $('run-goto-results').addEventListener('click', () => showView('results', { focus: true }));
+  $('stop').addEventListener('click', async () => {
+    await chrome.runtime.sendMessage({ type: 'STOP_RUN' }).catch(() => undefined);
+  });
+}
 
-$('export').addEventListener('click', async () => {
-  if (!lastState?.records?.length) return;
-  const blob = new Blob([recordsToCsv(lastState.records)], { type: 'text/csv;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  try {
-    await chrome.downloads.download({ url, filename: csvFilename(lastState.config), saveAs: true });
-  } finally {
-    setTimeout(() => URL.revokeObjectURL(url), 30000);
+function toBase64(text) {
+  const bytes = new TextEncoder().encode(text);
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
   }
-});
+  return btoa(binary);
+}
 
-$('clear').addEventListener('click', async () => {
-  if (lastState?.active) {
-    $('form-error').textContent = 'Stop the active run before clearing its results.';
-    return;
+function setupResultsEvents() {
+  $('results-goto-plan').addEventListener('click', () => showView('plan', { focus: true }));
+  $('plan-again').addEventListener('click', () => showView('plan', { focus: true }));
+
+  $('export').addEventListener('click', async () => {
+    if (!lastRun?.records?.length) return;
+    $('results-error').textContent = '';
+    const csv = recordsToCsv(lastRun.records);
+    const dataUrl = `data:text/csv;charset=utf-8;base64,${toBase64(csv)}`;
+    const response = await chrome.runtime.sendMessage({
+      type: 'DOWNLOAD_CSV', dataUrl, filename: csvFilename(lastRun.config)
+    }).catch((error) => ({ ok: false, error: error.message }));
+    if (response?.ok) {
+      const count = lastRun.records.length;
+      $('export').classList.add('saved');
+      $('export-label').textContent = `Saved ${count} places ✓`;
+      setTimeout(() => {
+        $('export').classList.remove('saved');
+        $('export-label').textContent = `Export CSV · ${lastRun?.records?.length || count} rows`;
+      }, 1800);
+    } else {
+      const message = response?.error || 'Export failed.';
+      $('results-error').textContent = message;
+      $('live-alert').textContent = message;
+    }
+  });
+
+  $('clear').addEventListener('click', async () => {
+    if (lastRun?.active) {
+      $('results-error').textContent = 'Stop the active run before clearing its results.';
+      $('live-alert').textContent = 'Stop the active run before clearing its results.';
+      return;
+    }
+    $('results-error').textContent = '';
+    const count = lastRun?.records?.length || 0;
+    if (Date.now() > clearArmedUntil) {
+      clearArmedUntil = Date.now() + 5000;
+      $('clear').classList.add('confirming');
+      $('clear').textContent = `Delete ${count} places? Click again`;
+      setTimeout(() => {
+        if (Date.now() >= clearArmedUntil) {
+          $('clear').classList.remove('confirming');
+          $('clear').textContent = 'Clear results';
+        }
+      }, 5200);
+      return;
+    }
+    clearArmedUntil = 0;
+    $('clear').classList.remove('confirming');
+    $('clear').textContent = 'Clear results';
+    await chrome.storage.local.remove('extractorRun');
+    renderAll(null);
+    showView('plan');
+  });
+}
+
+function setupTabs() {
+  for (const t of TABS) {
+    $(`tab-${t}`).addEventListener('click', () => showView(t, { focus: true }));
   }
-  await chrome.storage.local.remove('extractorRun');
-  $('form-error').textContent = '';
-  render(null);
-});
+  document.querySelector('.tabs').addEventListener('keydown', (event) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const current = TABS.indexOf(uiState.tab || 'plan');
+    let next = current;
+    if (event.key === 'ArrowLeft') next = (current + TABS.length - 1) % TABS.length;
+    if (event.key === 'ArrowRight') next = (current + 1) % TABS.length;
+    if (event.key === 'Home') next = 0;
+    if (event.key === 'End') next = TABS.length - 1;
+    $(`tab-${TABS[next]}`).focus();
+    showView(TABS[next]);
+  });
+}
 
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && changes.extractorRun) render(changes.extractorRun.newValue);
-});
+/* ---------- boot ---------- */
 
-const immediateDraft = localDraft();
-applyDraft(immediateDraft);
-if (!$('terms').value.trim()) $('terms').value = 'restaurants\nbanks\nparks\nshops';
+mountPips();
+initPopovers();
+setupPlanEvents();
+setupReviewEvents();
+setupRunEvents();
+setupResultsEvents();
+setupTabs();
+
+const hadLocalUi = Boolean(localStorage.getItem('extractorUi'));
+uiState = { tab: 'plan', view: null, ...localUi() };
+applyDraft(localDraft());
+if (!$('terms').value.trim()) $('terms').value = 'restaurants\npharmacies\nbanks\nhotels';
 syncForm();
 
-chrome.storage.local.get(['extractorDraft', 'extractorRun']).then((stored) => {
-  const storedDraft = stored.extractorDraft;
-  if (!immediateDraft || (storedDraft?.saved_at || 0) > (immediateDraft.saved_at || 0)) {
-    applyDraft(storedDraft);
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.extractorRun) renderAll(changes.extractorRun.newValue);
+});
+
+chrome.storage.local.get(['extractorDraft', 'extractorRun', 'extractorUi']).then((stored) => {
+  const immediate = localDraft();
+  if (!immediate || (stored.extractorDraft?.saved_at || 0) > (immediate.saved_at || 0)) {
+    applyDraft(stored.extractorDraft);
   }
-  render(stored.extractorRun);
+  if (stored.extractorUi && !hadLocalUi) {
+    uiState = { tab: 'plan', view: null, ...stored.extractorUi };
+  }
+  renderAll(stored.extractorRun);
+  showView(routeOnLoad(stored.extractorRun), { persist: false });
 }).catch((error) => { $('form-error').textContent = error.message; });
 
-setInterval(() => {
-  if (lastState?.nextRunAt) render(lastState);
-}, 1000);
+renderAll(null);
+showView(routeOnLoad(null), { persist: false });
+
+setInterval(tickCountdown, 1000);

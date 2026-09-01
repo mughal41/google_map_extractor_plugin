@@ -20,6 +20,35 @@ test('popup clearly distinguishes card-only data from detail-page visits', async
   assert.match(script, /include_popular_times: false/);
 });
 
+test('redesign keeps the estimate-and-confirm gate between plan and run', async () => {
+  const html = await readFile(new URL('../popup.html', import.meta.url), 'utf8');
+  assert.match(html, /id="view-review"/);
+  assert.match(html, /id="est-hero"/);
+  assert.match(html, /id="confirm-start"/);
+  assert.match(html, /id="receipt-rows"/);
+  assert.match(html, /id="risk-meter"/);
+  const script = await readFile(new URL('../popup.js', import.meta.url), 'utf8');
+  assert.match(script, /showView\('review'/, 'form submit stages the review view');
+  assert.doesNotMatch(
+    script.replace(/setupReviewEvents[\s\S]*?\n}/, ''),
+    /START_RUN/,
+    'START_RUN must only fire from the review confirm handler'
+  );
+});
+
+test('redesign ships tabs, popovers, and a data-url export path', async () => {
+  const html = await readFile(new URL('../popup.html', import.meta.url), 'utf8');
+  assert.match(html, /role="tablist"/);
+  assert.match(html, /id="popover"/);
+  assert.match(html, /role="status"/);
+  assert.match(html, /role="alert"/);
+  assert.match(html, /data-info="cooldown"/);
+  const background = await readFile(new URL('../background.js', import.meta.url), 'utf8');
+  assert.match(background, /DOWNLOAD_CSV/);
+  const content = await readFile(new URL('../content.js', import.meta.url), 'utf8');
+  assert.match(content, /cooldownTotalMs/, 'popup countdown ring needs the stored cooldown total');
+});
+
 test('popup exposes city resolution, ordered jobs, cooldown, and live run details', async () => {
   const source = await readFile(new URL('../popup.html', import.meta.url), 'utf8');
   assert.match(source, /City &amp; country/);
