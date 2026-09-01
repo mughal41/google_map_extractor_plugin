@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><title>Search card parser fixture</title></head>
+  <body>
+    <div role="feed">
+      <div role="article">
+        <a aria-label="Example Restaurant" href="https://www.google.com/maps/place/Example/@31.5208,74.3591,17z/data=!4m2!3m1!1sChIJabcdefghijklmno">Example Restaurant</a>
+        <div class="W4Efsd"><div class="AJB7ye"><span class="wZrhX"></span> <span class="e4rVHe fontBodyMedium"><span role="img" class="ZkP5Je" aria-label="4.8 stars 9,230 Reviews"><span class="MW4etd" aria-hidden="true">4.8</span><span class="UY7F9" aria-hidden="true">(9,230)</span></span></span></div></div>
+        <div class="W4Efsd"><div class="W4Efsd"><span><span>Restaurant</span></span><span> <span aria-hidden="true">·</span> <span class="google-symbols" aria-label="Wheelchair accessible entrance" role="img"><span class="doJOZc">symbol</span></span></span><span> <span aria-hidden="true">·</span> <span>Bahria Town Phase 7</span></span></div><div class="W4Efsd"><span><span><span>Closed</span><span> · Opens 12 PM</span></span></span></div></div>
+      </div>
+    </div>
+    <output id="result"></output>
+    <script type="module">
+      import { extractSearchDOM } from '../../lib/parser.js';
+      const [record] = extractSearchDOM(document, { include_additional_info: true });
+      document.querySelector('#result').textContent = JSON.stringify(record);
+    </script>
+  </body>
+</html>
