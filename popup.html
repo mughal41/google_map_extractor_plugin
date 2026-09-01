@@ -65,19 +65,15 @@
                 <div id="city-fields" class="field-stack">
                   <div class="grid-2">
                     <label>Country
-                      <input id="country" name="country" type="text" list="country-options" maxlength="80" autocomplete="country-name" placeholder="Pakistan">
+                      <input id="country" name="country" type="text" list="country-options" maxlength="80" autocomplete="off" placeholder="Start typing… e.g. Pakistan">
                     </label>
                     <label>City
-                      <input id="city" name="city" type="text" maxlength="100" autocomplete="address-level2" placeholder="Lahore">
+                      <input id="city" name="city" type="text" list="city-options" maxlength="100" autocomplete="off" placeholder="Start typing… e.g. Lahore">
                     </label>
                   </div>
-                  <datalist id="country-options">
-                    <option value="Pakistan"><option value="India"><option value="United Arab Emirates">
-                    <option value="Saudi Arabia"><option value="United Kingdom"><option value="United States">
-                    <option value="Canada"><option value="Australia"><option value="Germany"><option value="France">
-                    <option value="Spain"><option value="Italy"><option value="Turkey"><option value="Malaysia">
-                    <option value="Singapore"><option value="Indonesia"><option value="Bangladesh"><option value="Sri Lanka">
-                  </datalist>
+                  <datalist id="country-options"></datalist>
+                  <datalist id="city-options"></datalist>
+                  <p class="field-note" id="city-hint">All countries are suggested as you type. Pick one and major cities are suggested too — any city name works.</p>
                   <div class="grid-2">
                     <div class="field">
                       <span class="label-row"><label for="coverage-mode">Strategy</label> <button class="info" id="strategy-info" data-info="coverage-adaptive" type="button"></button></span>
@@ -170,6 +166,10 @@
 
             <aside class="rail">
               <div class="rail-card">
+                <div class="pip-row">
+                  <span class="pip pip-rail" data-stage="idle"></span>
+                  <p class="pip-bubble" id="plan-quip"></p>
+                </div>
                 <h2 class="rail-title">Plan summary</h2>
                 <dl class="rail-facts">
                   <div><dt>Area</dt><dd id="rail-area">—</dd></div>
@@ -205,6 +205,10 @@
               <p class="caps-label">Estimated run</p>
               <p class="est-hero"><strong id="est-hero">—</strong><span id="est-range" class="est-range"></span></p>
               <p id="est-finish" class="est-finish"></p>
+              <div class="pip-row">
+                <span class="pip" data-stage="idle"></span>
+                <p class="pip-bubble" id="review-quip"></p>
+              </div>
             </header>
 
             <div class="receipt" id="receipt">
@@ -248,7 +252,9 @@
               <div class="run-hero-text">
                 <p class="run-stage"><strong id="stage">Idle</strong><span class="job-pill" id="job-badge" hidden>0 / 0</span></p>
                 <p class="run-substage" id="next-action-line">—</p>
+                <p class="run-eta" id="eta-line" hidden>—</p>
               </div>
+              <p class="pip-bubble run-bubble" id="run-quip" hidden></p>
             </header>
 
             <div class="progress" role="progressbar" id="progress" aria-label="Run progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="No jobs yet">
@@ -294,6 +300,7 @@
               <div>
                 <h2 id="results-headline">Run complete</h2>
                 <p id="results-sub" class="results-sub"></p>
+                <p class="pip-bubble" id="results-quip"></p>
               </div>
             </header>
 
@@ -325,13 +332,13 @@
 
       <footer class="statusbar">
         <span class="statusbar-note">Browser-only · nothing leaves this machine <button class="info" data-info="local-only" type="button"></button></span>
-        <span class="statusbar-version">v0.6.0</span>
+        <span class="statusbar-version">v0.6.1</span>
       </footer>
 
       <div id="popover" class="popover" hidden></div>
       <p id="live-status" class="sr-only" role="status"></p>
       <p id="live-alert" class="sr-only" role="alert"></p>
     </div>
-    <script type="module" src="popup.js?v=0.6.0"></script>
+    <script type="module" src="popup.js?v=0.6.1"></script>
   </body>
 </html>

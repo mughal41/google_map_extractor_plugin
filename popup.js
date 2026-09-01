@@ -1,10 +1,14 @@
 import { csvFilename, recordsToCsv } from './lib/csv.js';
-import { formatClock, planEstimate } from './lib/estimate.js';
+import {
+  ENRICH_VISITS_PER_JOB_MAX, ENRICH_VISITS_PER_JOB_MIN, estimateRemainingMs, formatClock, planEstimate
+} from './lib/estimate.js';
+import { COUNTRIES, citiesForCountry } from './lib/geo.js';
 import { GLOSSARY } from './lib/glossary.js';
 import { normalizeTerms } from './lib/location.js';
 import { LONG_REST_MULTIPLIER } from './lib/pacing.js';
 import { initPopovers } from './lib/popover.js';
 import { MAX_TERMS, TERM_PRESETS } from './lib/presets.js';
+import { quip } from './lib/quips.js';
 
 const $ = (id) => document.getElementById(id);
 const activeStages = new Set([
@@ -29,6 +33,9 @@ let lastRun = null;
 let uiState = { tab: 'plan', view: null };
 let lastAnnouncedStage = null;
 let clearArmedUntil = 0;
+let lastCityCountry = null;
+let etaCache = null;
+const presetChips = new Map();
 
 /* ---------- formatting ---------- */
 
@@ -237,6 +244,42 @@ function areaText() {
   return lat && lng ? `${lat}, ${lng} · ${$('radius').value || 0} m` : '—';
 }
 
+function populateCountryList() {
+  const list = $('country-options');
+  for (const name of COUNTRIES) {
+    const option = document.createElement('option');
+    option.value = name;
+    list.append(option);
+  }
+}
+
+function syncCityList() {
+  const country = $('country').value.trim();
+  if (country === lastCityCountry) return;
+  lastCityCountry = country;
+  const cities = citiesForCountry(country);
+  const list = $('city-options');
+  list.innerHTML = '';
+  for (const name of cities) {
+    const option = document.createElement('option');
+    option.value = name;
+    list.append(option);
+  }
+  $('city-hint').textContent = cities.length
+    ? `Suggesting ${cities.length} major cities for ${country} — any other city name works too.`
+    : 'All countries are suggested as you type. Pick one and major cities are suggested too — any city name works.';
+}
+
+function updatePresetChips() {
+  const existing = new Set($('terms').value.split(/\n+/).map((line) => line.trim()).filter(Boolean));
+  for (const [preset, button] of presetChips) {
+    const active = preset.terms.every((term) => existing.has(term));
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    button.textContent = `${active ? '✓' : '+'} ${preset.label} (${preset.terms.length})`;
+  }
+}
+
 const RISK_COPY = {
   low: { label: 'Low risk', text: 'A comfortable pace, well inside what Maps tolerates.' },
   elevated: { label: 'Elevated risk', text: 'Over 60 searches raises the odds Maps slows you down. Lower the job budget or switch to City search.' },
@@ -266,6 +309,11 @@ function updateRail() {
   }
   $('term-count').childNodes[0].textContent = `${config.terms.length} / ${MAX_TERMS} terms `;
   $('term-count').classList.toggle('at-limit', config.terms.length >= MAX_TERMS);
+  updatePresetChips();
+  const area = areaText();
+  $('plan-quip').textContent = config.terms.length
+    ? quip('plan_ready', { terms: config.terms.length, area: area === '—' ? 'the map' : area }, `${config.terms.length}:${area}`)
+    : quip('plan_empty', {}, String(new Date().getHours()));
 }
 
 function syncForm() {
@@ -280,6 +328,7 @@ function syncForm() {
     strategyInfo.dataset.info = strategyKey;
     strategyInfo.setAttribute('aria-label', `About: ${GLOSSARY[strategyKey].title}`);
   }
+  syncCityList();
   updateRail();
 }
 
@@ -347,7 +396,10 @@ function renderReview() {
   }
   if (estimate.enrichment) {
     rows.append(receiptRow({
-      label: 'Enrichment', note: '~9 s per incomplete place, after collection', value: '+ variable', cls: 'open-ended'
+      label: 'Enrichment',
+      note: `after collection · assumes ${ENRICH_VISITS_PER_JOB_MIN}–${ENRICH_VISITS_PER_JOB_MAX} visits per search`,
+      value: `${fmtMMSS(estimate.enrichMinMs)}–${fmtMMSS(estimate.enrichMaxMs)}`,
+      cls: 'open-ended'
     }));
   }
   rows.append(receiptRow({
@@ -368,6 +420,10 @@ function renderReview() {
     item.textContent = term;
     list.append(item);
   }
+
+  $('review-quip').textContent = quip('review', {
+    time: formatClock(estimate.typicalMs), jobs: estimate.jobs
+  }, `${estimate.jobs}:${estimate.typicalMs}`);
 
   $('confirm-start').textContent = `Confirm & start · ~${formatClock(estimate.typicalMs)}`;
   $('confirm-start').disabled = Boolean(lastRun?.active);
@@ -442,6 +498,18 @@ function renderRun(state) {
   const gotoResults = $('run-goto-results');
   gotoResults.hidden = !(stage === 'error' && state.records?.length);
   if (!gotoResults.hidden) gotoResults.textContent = `View ${state.records.length} collected places →`;
+
+  etaCache = { value: estimateRemainingMs(state), at: Date.now() };
+  renderEtaLine();
+  const QUIP_STAGES = {
+    searching: 'searching', waiting_between_jobs: 'waiting', resolving_location: 'resolving',
+    opening_search: 'resolving', filtering: 'filtering', enriching: 'enriching', error: 'error'
+  };
+  const quipContext = QUIP_STAGES[stage];
+  $('run-quip').hidden = !quipContext;
+  if (quipContext) {
+    $('run-quip').textContent = quip(quipContext, { term: currentJob?.term || 'places' }, `${stage}:${completeJobs}`);
+  }
 }
 
 /* ---------- results view ---------- */
@@ -474,6 +542,11 @@ function renderResults(state) {
   const jobsDone = state.jobsCompleted ?? 0;
   const errorCount = state.errors?.length ?? 0;
   $('results-sub').textContent = `${state.records.length} unique places from ${jobsDone} searches · ${errorCount} error${errorCount === 1 ? '' : 's'}${finished ? '' : ' · still collecting'}`;
+  $('results-quip').textContent = stage === 'complete'
+    ? quip('complete', { count: state.records.length }, String(state.records.length))
+    : stage === 'stopped' ? quip('stopped', {}, String(jobsDone))
+    : stage === 'error' ? quip('error', {}, String(jobsDone))
+    : '';
 
   const discovered = state.discovered ?? 0;
   const uniqueMerged = state.unique ?? state.records.length;
@@ -548,7 +621,19 @@ function renderAll(state) {
 
 /* ---------- countdown ---------- */
 
+function renderEtaLine() {
+  const line = $('eta-line');
+  if (!lastRun?.active || !etaCache || !Number.isFinite(etaCache.value)) {
+    line.hidden = true;
+    return;
+  }
+  const left = Math.max(0, etaCache.value - (Date.now() - etaCache.at));
+  line.hidden = false;
+  line.textContent = left > 45000 ? `~${formatClock(left)} left` : 'Wrapping up soon…';
+}
+
 function tickCountdown() {
+  renderEtaLine();
   const pips = [$('pip-topbar'), $('pip-run')].filter(Boolean);
   if (lastRun?.nextRunAt && lastRun.stage === 'waiting_between_jobs') {
     const remaining = new Date(lastRun.nextRunAt).getTime() - Date.now();
@@ -567,14 +652,23 @@ function tickCountdown() {
 
 /* ---------- events ---------- */
 
-function addPresetTerms(preset) {
+function togglePresetTerms(preset) {
   const existing = $('terms').value.split(/\n+/).map((line) => line.trim()).filter(Boolean);
-  const merged = [...new Set([...existing, ...preset.terms])];
-  $('terms').value = merged.slice(0, MAX_TERMS).join('\n');
-  $('form-error').textContent = merged.length > MAX_TERMS
-    ? `Kept the first ${MAX_TERMS} terms — one run is capped at ${MAX_TERMS} searches to stay under Google's rate limits. Save the rest for a second plan.`
-    : '';
-  $('live-status').textContent = `${preset.label} preset merged. ${normalizeTerms($('terms').value).length} of ${MAX_TERMS} terms.`;
+  const existingSet = new Set(existing);
+  const isActive = preset.terms.every((term) => existingSet.has(term));
+  if (isActive) {
+    const drop = new Set(preset.terms);
+    $('terms').value = existing.filter((term) => !drop.has(term)).join('\n');
+    $('form-error').textContent = '';
+    $('live-status').textContent = `${preset.label} preset removed. ${normalizeTerms($('terms').value).length} of ${MAX_TERMS} terms.`;
+  } else {
+    const merged = [...new Set([...existing, ...preset.terms])];
+    $('terms').value = merged.slice(0, MAX_TERMS).join('\n');
+    $('form-error').textContent = merged.length > MAX_TERMS
+      ? `Kept the first ${MAX_TERMS} terms — one run is capped at ${MAX_TERMS} searches to stay under Google's rate limits. Save the rest for a second plan.`
+      : '';
+    $('live-status').textContent = `${preset.label} preset added. ${normalizeTerms($('terms').value).length} of ${MAX_TERMS} terms.`;
+  }
   syncForm();
   persistDraft();
 }
@@ -585,8 +679,10 @@ function setupPlanEvents() {
     button.type = 'button';
     button.className = 'chip';
     button.textContent = `+ ${preset.label} (${preset.terms.length})`;
-    button.title = preset.description;
-    button.addEventListener('click', () => addPresetTerms(preset));
+    button.title = `${preset.description} Click again to remove these terms.`;
+    button.setAttribute('aria-pressed', 'false');
+    button.addEventListener('click', () => togglePresetTerms(preset));
+    presetChips.set(preset, button);
     $('preset-row').append(button);
   }
 
@@ -724,6 +820,7 @@ function setupTabs() {
 
 mountPips();
 initPopovers();
+populateCountryList();
 setupPlanEvents();
 setupReviewEvents();
 setupRunEvents();
