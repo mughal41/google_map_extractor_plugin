@@ -1,3 +1,4 @@
+import { attachCombobox } from './lib/combobox.js';
 import { csvFilename, recordsToCsv } from './lib/csv.js';
 import {
   ENRICH_VISITS_PER_JOB_MAX, ENRICH_VISITS_PER_JOB_MIN, estimateRemainingMs, formatClock, planEstimate
@@ -8,7 +9,7 @@ import { normalizeTerms } from './lib/location.js';
 import { LONG_REST_MULTIPLIER } from './lib/pacing.js';
 import { initPopovers } from './lib/popover.js';
 import { MAX_TERMS, TERM_PRESETS } from './lib/presets.js';
-import { quip } from './lib/quips.js';
+import { quip, randomQuip } from './lib/quips.js';
 
 const $ = (id) => document.getElementById(id);
 const activeStages = new Set([
@@ -244,27 +245,16 @@ function areaText() {
   return lat && lng ? `${lat}, ${lng} · ${$('radius').value || 0} m` : '—';
 }
 
-function populateCountryList() {
-  const list = $('country-options');
-  for (const name of COUNTRIES) {
-    const option = document.createElement('option');
-    option.value = name;
-    list.append(option);
-  }
+function setupGeoSuggestions() {
+  attachCombobox($('country'), () => COUNTRIES);
+  attachCombobox($('city'), () => citiesForCountry($('country').value));
 }
 
-function syncCityList() {
+function syncCityHint() {
   const country = $('country').value.trim();
   if (country === lastCityCountry) return;
   lastCityCountry = country;
   const cities = citiesForCountry(country);
-  const list = $('city-options');
-  list.innerHTML = '';
-  for (const name of cities) {
-    const option = document.createElement('option');
-    option.value = name;
-    list.append(option);
-  }
   $('city-hint').textContent = cities.length
     ? `Suggesting ${cities.length} major cities for ${country} — any other city name works too.`
     : 'All countries are suggested as you type. Pick one and major cities are suggested too — any city name works.';
@@ -311,9 +301,20 @@ function updateRail() {
   $('term-count').classList.toggle('at-limit', config.terms.length >= MAX_TERMS);
   updatePresetChips();
   const area = areaText();
-  $('plan-quip').textContent = config.terms.length
-    ? quip('plan_ready', { terms: config.terms.length, area: area === '—' ? 'the map' : area }, `${config.terms.length}:${area}`)
-    : quip('plan_empty', {}, String(new Date().getHours()));
+  $('plan-quip').textContent = estimate.jobs && estimate.risk === 'high'
+    ? quip('risk_high', {}, String(estimate.ceiling))
+    : config.terms.length
+      ? quip('plan_ready', { terms: config.terms.length, area: area === '—' ? 'the map' : area }, `${config.terms.length}:${area}`)
+      : quip('plan_empty', {}, String(new Date().getHours()));
+}
+
+function speak(id, text) {
+  const bubble = $(id);
+  if (!bubble || !text) return;
+  bubble.textContent = text;
+  bubble.classList.remove('pop');
+  void bubble.offsetWidth;
+  bubble.classList.add('pop');
 }
 
 function syncForm() {
@@ -328,7 +329,7 @@ function syncForm() {
     strategyInfo.dataset.info = strategyKey;
     strategyInfo.setAttribute('aria-label', `About: ${GLOSSARY[strategyKey].title}`);
   }
-  syncCityList();
+  syncCityHint();
   updateRail();
 }
 
@@ -661,7 +662,12 @@ function togglePresetTerms(preset) {
     $('terms').value = existing.filter((term) => !drop.has(term)).join('\n');
     $('form-error').textContent = '';
     $('live-status').textContent = `${preset.label} preset removed. ${normalizeTerms($('terms').value).length} of ${MAX_TERMS} terms.`;
-  } else {
+    syncForm();
+    persistDraft();
+    speak('plan-quip', randomQuip('preset_remove', { label: preset.label }));
+    return;
+  }
+  {
     const merged = [...new Set([...existing, ...preset.terms])];
     $('terms').value = merged.slice(0, MAX_TERMS).join('\n');
     $('form-error').textContent = merged.length > MAX_TERMS
@@ -671,6 +677,67 @@ function togglePresetTerms(preset) {
   }
   syncForm();
   persistDraft();
+  speak('plan-quip', randomQuip('preset_add', { label: preset.label }));
+}
+
+/* ---------- Pip's theater ---------- */
+
+const PIP_MOODS = ['mood-bounce', 'mood-twitch', 'mood-peek', 'mood-spin'];
+const CALM_STAGES = new Set(['idle', 'complete', 'stopped']);
+
+function visiblePips() {
+  return [...document.querySelectorAll('.pip')].filter((pip) =>
+    !pip.closest('[hidden]') && CALM_STAGES.has(pip.dataset.stage || 'idle'));
+}
+
+function playMood(pip, mood) {
+  pip.classList.remove(...PIP_MOODS);
+  void pip.offsetWidth;
+  pip.classList.add(mood);
+  setTimeout(() => pip.classList.remove(mood), 1500);
+}
+
+function rotateQuips() {
+  if (!$('view-plan').hidden) {
+    const terms = termsFromForm();
+    if (terms.length) {
+      const area = areaText();
+      speak('plan-quip', randomQuip('plan_ready', { terms: terms.length, area: area === '—' ? 'the map' : area }));
+    } else {
+      speak('plan-quip', randomQuip('plan_empty'));
+    }
+  }
+  if (!$('view-run').hidden && lastRun?.active) {
+    const contexts = {
+      searching: 'searching', waiting_between_jobs: 'waiting', resolving_location: 'resolving',
+      opening_search: 'resolving', filtering: 'filtering', enriching: 'enriching'
+    };
+    const context = contexts[lastRun.stage];
+    if (context) {
+      const term = lastRun.jobs?.[lastRun.currentJobIndex]?.term || 'places';
+      speak('run-quip', randomQuip(context, { term }));
+    }
+  }
+}
+
+function startPipTheater() {
+  document.addEventListener('click', (event) => {
+    const pip = event.target.closest?.('.pip');
+    if (!pip) return;
+    playMood(pip, 'mood-spin');
+    const bubbleId = ['plan-quip', 'run-quip', 'review-quip', 'results-quip']
+      .find((id) => { const el = $(id); return el && !el.closest('[hidden]'); });
+    if (bubbleId) speak(bubbleId, randomQuip('pip_poke'));
+  });
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  setInterval(() => {
+    if (document.hidden || Math.random() < 0.4) return;
+    const pips = visiblePips();
+    if (!pips.length) return;
+    const pip = pips[Math.floor(Math.random() * pips.length)];
+    playMood(pip, PIP_MOODS[Math.floor(Math.random() * PIP_MOODS.length)]);
+  }, 7000);
+  setInterval(rotateQuips, 15000);
 }
 
 function setupPlanEvents() {
@@ -820,12 +887,13 @@ function setupTabs() {
 
 mountPips();
 initPopovers();
-populateCountryList();
+setupGeoSuggestions();
 setupPlanEvents();
 setupReviewEvents();
 setupRunEvents();
 setupResultsEvents();
 setupTabs();
+startPipTheater();
 
 const hadLocalUi = Boolean(localStorage.getItem('extractorUi'));
 uiState = { tab: 'plan', view: null, ...localUi() };

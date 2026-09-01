@@ -65,14 +65,12 @@
                 <div id="city-fields" class="field-stack">
                   <div class="grid-2">
                     <label>Country
-                      <input id="country" name="country" type="text" list="country-options" maxlength="80" autocomplete="off" placeholder="Start typing… e.g. Pakistan">
+                      <input id="country" name="country" type="text" maxlength="80" autocomplete="off" placeholder="Start typing… e.g. Pakistan">
                     </label>
                     <label>City
-                      <input id="city" name="city" type="text" list="city-options" maxlength="100" autocomplete="off" placeholder="Start typing… e.g. Lahore">
+                      <input id="city" name="city" type="text" maxlength="100" autocomplete="off" placeholder="Start typing… e.g. Lahore">
                     </label>
                   </div>
-                  <datalist id="country-options"></datalist>
-                  <datalist id="city-options"></datalist>
                   <p class="field-note" id="city-hint">All countries are suggested as you type. Pick one and major cities are suggested too — any city name works.</p>
                   <div class="grid-2">
                     <div class="field">
@@ -332,13 +330,13 @@
 
       <footer class="statusbar">
         <span class="statusbar-note">Browser-only · nothing leaves this machine <button class="info" data-info="local-only" type="button"></button></span>
-        <span class="statusbar-version">v0.6.1</span>
+        <span class="statusbar-version">v0.6.2</span>
       </footer>
 
       <div id="popover" class="popover" hidden></div>
       <p id="live-status" class="sr-only" role="status"></p>
       <p id="live-alert" class="sr-only" role="alert"></p>
     </div>
-    <script type="module" src="popup.js?v=0.6.1"></script>
+    <script type="module" src="popup.js?v=0.6.2"></script>
   </body>
 </html>

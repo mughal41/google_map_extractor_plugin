@@ -424,3 +424,48 @@ textarea { font-family: var(--mono); font-size: 12.5px; line-height: 1.6; resize
 @media (forced-colors: active) {
   .chip.active, .chip[aria-pressed="true"] { border: 2px solid SelectedItem; }
 }
+/* ---- combobox (custom datalist replacement) ---- */
+.combo-panel {
+  position: fixed; z-index: 45; max-height: 218px; max-width: 320px;
+  overflow-y: auto; overscroll-behavior: contain;
+  border: 1px solid var(--border-strong); border-radius: 10px;
+  background: var(--surface); box-shadow: var(--shadow-pop); padding: 4px;
+}
+.combo-option {
+  border-radius: 7px; padding: 7px 10px; cursor: pointer;
+  color: var(--text); font-size: 12.5px;
+}
+.combo-option:hover, .combo-option.active { background: var(--accent-subtle); color: var(--accent); }
+.combo-panel::-webkit-scrollbar { width: 8px; }
+.combo-panel::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 99px; }
+
+/* ---- Pip's theater ---- */
+.pip { cursor: pointer; }
+.pip.mood-bounce .pip-svg { animation: pip-hop 800ms var(--ease); }
+@keyframes pip-hop {
+  25% { transform: translateY(-5px); }
+  50% { transform: translateY(0); }
+  70% { transform: translateY(-2px); }
+  100% { transform: translateY(0); }
+}
+.pip.mood-twitch .p-needle { animation: pip-twitch 700ms var(--ease); }
+@keyframes pip-twitch {
+  20% { transform: rotate(-40deg); }
+  45% { transform: rotate(-8deg); }
+  70% { transform: rotate(-32deg); }
+  100% { transform: rotate(-24deg); }
+}
+.pip.mood-peek .p-eyes { animation: pip-glance 1.3s var(--ease); }
+@keyframes pip-glance {
+  20% { transform: translateX(-2.5px); }
+  55% { transform: translateX(2.5px); }
+  100% { transform: translateX(0); }
+}
+.pip.mood-spin .p-needle { animation: pip-flourish 750ms var(--ease); }
+@keyframes pip-flourish { to { transform: rotate(336deg); } }
+.pip-bubble.pop { animation: bubble-pop 280ms var(--ease); }
+@keyframes bubble-pop {
+  from { opacity: .4; transform: scale(.92); }
+  60% { transform: scale(1.03); }
+  to { opacity: 1; transform: scale(1); }
+}

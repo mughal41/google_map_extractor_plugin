@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Google Maps Light Extractor",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Run bounded adaptive Google Maps city scans or radius plans and export one merged CSV.",
   "permissions": ["storage", "tabs", "downloads"],
   "host_permissions": ["https://www.google.com/maps/*"],
