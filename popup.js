@@ -496,6 +496,9 @@ function renderRun(state) {
   $('errors').classList.toggle('has-errors', errorCount > 0);
   $('coverage-label').textContent = state.config?.location_mode === 'coordinates' ? 'In radius' : 'Accepted';
   $('stop').disabled = !active;
+  const resumable = stage === 'error' && !state.active && Boolean(jobs[state.currentJobIndex]) && Boolean(state.resolvedLocation);
+  $('resume').hidden = !resumable;
+  $('stop').hidden = resumable;
   const gotoResults = $('run-goto-results');
   gotoResults.hidden = !(stage === 'error' && state.records?.length);
   if (!gotoResults.hidden) gotoResults.textContent = `View ${state.records.length} collected places →`;
@@ -797,16 +800,13 @@ function setupRunEvents() {
   $('stop').addEventListener('click', async () => {
     await chrome.runtime.sendMessage({ type: 'STOP_RUN' }).catch(() => undefined);
   });
-}
-
-function toBase64(text) {
-  const bytes = new TextEncoder().encode(text);
-  let binary = '';
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  }
-  return btoa(binary);
+  $('resume').addEventListener('click', async () => {
+    $('resume').disabled = true;
+    const response = await chrome.runtime.sendMessage({ type: 'RESUME_RUN' })
+      .catch((error) => ({ ok: false, error: error.message }));
+    $('resume').disabled = false;
+    if (!response?.ok) $('live-alert').textContent = response?.error || 'Could not resume the run.';
+  });
 }
 
 function setupResultsEvents() {
@@ -816,21 +816,12 @@ function setupResultsEvents() {
   $('export').addEventListener('click', async () => {
     if (!lastRun?.records?.length) return;
     $('results-error').textContent = '';
-    const csv = recordsToCsv(lastRun.records);
-    const dataUrl = `data:text/csv;charset=utf-8;base64,${toBase64(csv)}`;
-    const response = await chrome.runtime.sendMessage({
-      type: 'DOWNLOAD_CSV', dataUrl, filename: csvFilename(lastRun.config)
-    }).catch((error) => ({ ok: false, error: error.message }));
-    if (response?.ok) {
-      const count = lastRun.records.length;
-      $('export').classList.add('saved');
-      $('export-label').textContent = `Saved ${count} places ✓`;
-      setTimeout(() => {
-        $('export').classList.remove('saved');
-        $('export-label').textContent = `Export CSV · ${lastRun?.records?.length || count} rows`;
-      }, 1800);
-    } else {
-      const message = response?.error || 'Export failed.';
+    // Export runs in its own extension tab: a data: URL of thousands of rows is
+    // rejected by chrome.downloads, and a popup-owned blob dies with the popup.
+    try {
+      await chrome.tabs.create({ url: chrome.runtime.getURL('export.html') });
+    } catch (error) {
+      const message = error?.message || 'Export failed.';
       $('results-error').textContent = message;
       $('live-alert').textContent = message;
     }

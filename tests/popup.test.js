@@ -44,7 +44,11 @@ test('redesign ships tabs, popovers, and a data-url export path', async () => {
   assert.match(html, /role="alert"/);
   assert.match(html, /data-info="cooldown"/);
   const background = await readFile(new URL('../background.js', import.meta.url), 'utf8');
-  assert.match(background, /DOWNLOAD_CSV/);
+  assert.doesNotMatch(background, /DOWNLOAD_CSV/);
+  assert.match(background, /RESUME_RUN/, 'interrupted runs need a resume path');
+  assert.match(html, /id="resume"/);
+  const exportPage = await readFile(new URL('../export.js', import.meta.url), 'utf8');
+  assert.match(exportPage, /createObjectURL/, 'large exports need a blob URL, not a data: URL');
   const content = await readFile(new URL('../content.js', import.meta.url), 'utf8');
   assert.match(content, /cooldownTotalMs/, 'popup countdown ring needs the stored cooldown total');
 });

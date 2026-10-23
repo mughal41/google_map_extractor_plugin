@@ -80,15 +80,32 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
-  if (message?.type === 'DOWNLOAD_CSV') {
-    // Downloads run from the worker so the popup closing cannot abort them; a
-    // data: URL is self-contained, unlike a popup-owned blob: URL.
+  if (message?.type === 'RESUME_RUN') {
+    // Reactivate a run that failed mid-job (for example when storage filled
+    // up). The interrupted job restarts from its first result; deduplication
+    // absorbs anything it had already collected.
     (async () => {
-      await chrome.downloads.download({
-        url: message.dataUrl,
-        filename: message.filename || 'google_maps_export.csv',
-        saveAs: true
-      });
+      const { extractorRun } = await chrome.storage.local.get('extractorRun');
+      if (!extractorRun || extractorRun.active) {
+        sendResponse({ ok: false, error: extractorRun ? 'The run is already active.' : 'There is no run to resume.' });
+        return;
+      }
+      const job = extractorRun.jobs?.[extractorRun.currentJobIndex];
+      if (!job || !extractorRun.resolvedLocation) {
+        sendResponse({ ok: false, error: 'This run cannot be resumed. Plan a new run for the remaining terms.' });
+        return;
+      }
+      job.status = 'pending';
+      extractorRun.active = true;
+      extractorRun.stage = 'waiting_between_jobs';
+      extractorRun.nextRunAt = new Date().toISOString();
+      extractorRun.updatedAt = extractorRun.nextRunAt;
+      extractorRun.message = `Resuming at job ${extractorRun.currentJobIndex + 1} of ${extractorRun.jobs.length}: ${job.term}…`;
+      await chrome.storage.local.set({ extractorRun });
+      const url = searchUrlForJob(extractorRun.config, job.term, extractorRun.resolvedLocation, job.cell);
+      const tab = await activeTab();
+      if (tab?.id) await chrome.tabs.update(tab.id, { url });
+      else await chrome.tabs.create({ url });
       sendResponse({ ok: true });
     })().catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;

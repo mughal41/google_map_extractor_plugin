@@ -1,0 +1,12 @@
+{
+  "base_config": "config.json",
+  "remote_dir": "map_extractor",
+  "results_dir": "results",
+  "ssh_options": [],
+  "servers": [
+    { "name": "vps1", "host": "root@203.0.113.11" },
+    { "name": "vps2", "host": "root@203.0.113.12" },
+    { "name": "vps3", "host": "ubuntu@198.51.100.7", "ssh_options": ["-p", "2222"] },
+    { "name": "vps4", "host": "root@192.0.2.40", "overrides": { "proxy": "residential.example:8000" } }
+  ]
+}

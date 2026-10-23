@@ -6,7 +6,8 @@ import {
   splitScanCell
 } from './lib/location.js';
 import { Logger } from './lib/logger.js';
-import { baseCooldownMs, cooldownAfterJob } from './lib/pacing.js';
+import { BUDGET_KEY, spendBudget } from './lib/budget.js';
+import { baseCooldownMs, cooldownAfterJob, detailPauseMs } from './lib/pacing.js';
 import {
   extractPlaceDOM, extractPlaceEmbeddedState, extractSearchDOM, extractSearchPayload,
   isBlockingPage
@@ -60,6 +61,34 @@ async function waitForPage(signal) {
   });
 }
 
+// Charges one page load against the daily budget, or holds the run here
+// until the budget resets. Returns false when the run was stopped meanwhile.
+async function waitForBudget(state, kind, signal) {
+  for (;;) {
+    if (!(await currentRunActive(signal))) return false;
+    const now = new Date();
+    const stored = (await chrome.storage.local.get(BUDGET_KEY))[BUDGET_KEY];
+    const { verdict, usage } = spendBudget(stored, state.config, kind, now);
+    await chrome.storage.local.set({ [BUDGET_KEY]: usage });
+    if (verdict.ok) {
+      if (state.pausedUntil) {
+        state.pausedUntil = null;
+        await saveRun(state);
+      }
+      return true;
+    }
+    if (state.pausedUntil !== verdict.resumeAt) {
+      const label = kind === 'searches' ? 'search' : 'place-page';
+      state.pausedUntil = verdict.resumeAt;
+      state.message = verdict.reason === 'blocked'
+        ? `Google blocked this IP today. Paused until ${new Date(verdict.resumeAt).toLocaleString()}; collected results are kept.`
+        : `Daily ${label} budget almost used (${verdict.used}/${verdict.limit}). Paused until ${new Date(verdict.resumeAt).toLocaleString()}; the run continues on its own.`;
+      await saveRun(state);
+    }
+    await delay(Math.min(60000, Math.max(1000, new Date(verdict.resumeAt) - now)), signal);
+  }
+}
+
 async function currentRunActive(signal) {
   if (signal.aborted) return false;
   return Boolean((await getRun())?.active);
@@ -90,10 +119,14 @@ async function startContentController() {
     if (message?.type === 'STOP_RUN') abortController.abort();
   });
 
-  injectPageObserver();
-  await waitForPage(abortController.signal);
   const state = await getRun();
   if (!state?.active) return;
+  // The fetch/XHR observer only matters for search-result payloads. Maps
+  // detects patched network APIs and then serves place pages without their
+  // detail panel, so keep the page untouched during the detail phase and
+  // whenever no run is active.
+  if (state.stage !== 'filtering' && state.stage !== 'enriching') injectPageObserver();
+  await waitForPage(abortController.signal);
   const logger = new Logger(state.config?.debug);
   const block = isBlockingPage(document);
   if (block) {
@@ -185,6 +218,7 @@ async function resolveCityLocation(state, logger, signal) {
   state.message = `Resolved to ${state.resolvedLocation.label}. Planned ${state.jobs.length} initial cell searches; opening ${job.term}.`;
   await saveRun(state);
   await delay(1200, signal);
+  if (!(await waitForBudget(state, 'searches', signal))) return;
   location.assign(searchUrlForJob(state.config, job.term, state.resolvedLocation, job.cell));
 }
 
@@ -289,6 +323,8 @@ async function collectSearchResults(state, logger, signal, payloadQueue) {
     state.message = `Job ${state.currentJobIndex + 1}/${state.jobs.length} · ${describeJob(job)} · ${observed.size} cards · ${records.length} unique total.`;
     await saveRun(state);
 
+    const resultCap = Number(state.config.max_results_per_search) || 0;
+    if (resultCap && observed.size >= resultCap) break;
     const explicitEnd = endOfListTextFound(feed, document);
     const atBottom = feed.scrollTop + feed.clientHeight >= feed.scrollHeight - 12;
     stall = nextStallState(stall, {
@@ -340,6 +376,7 @@ async function resumeScheduledJob(state, signal) {
   const latest = await getRun() || state;
   const job = latest.jobs[latest.currentJobIndex];
   if (!job) return;
+  if (!(await waitForBudget(latest, 'searches', signal))) return;
   job.status = 'running';
   job.startedAt = new Date().toISOString();
   job.baseUnique = (latest.records || []).length;
@@ -457,12 +494,18 @@ async function navigateToCurrentDetail(state, signal) {
     await advanceOrComplete(state, signal);
     return;
   }
-  await delay(2000, signal);
+  // Save the skipped-ahead detailIndex before leaving, or the next page would
+  // merge this place's panel into an earlier record.
+  const { pauseMs, longRest } = detailPauseMs(state.config.detail_delay_ms, state.detailIndex);
+  if (longRest) state.message = `Enriched ${state.detailIndex} places — taking a ${Math.round(pauseMs / 1000)}-second break…`;
+  await saveRun(state);
+  await delay(pauseMs, signal);
+  if (!(await waitForBudget(state, 'details', signal))) return;
   location.assign(record.g_maps_url);
 }
 
-async function waitForDetailContent(signal) {
-  for (let attempt = 0; attempt < 24; attempt += 1) {
+async function waitForDetailContent(signal, maxMs = 20000) {
+  for (let attempt = 0; attempt < Math.ceil(maxMs / 500); attempt += 1) {
     if (document.querySelector('h1') || document.querySelector('script[type="application/ld+json"]')) return true;
     await delay(500, signal);
   }
@@ -481,11 +524,21 @@ async function enrichCurrentPlace(state, logger, signal) {
   const hasContent = await waitForDetailContent(signal);
   const key = placeKey(record) || `index:${index}`;
   const attempts = state.detailAttempts?.[key] || 0;
-  if (!hasContent && attempts < 1) {
+  if (!hasContent && attempts < 2) {
+    // During a chain of place views Maps sometimes boots a bare map shell
+    // without the place panel, and a plain reload repeats the same shell.
+    // Back off, then load the place through a different URL form.
+    const backoffMs = attempts === 0 ? 10000 : 30000;
     state.detailAttempts = { ...(state.detailAttempts || {}), [key]: attempts + 1 };
-    state.message = `Retrying detail ${index + 1} of ${state.records.length} once…`;
+    state.message = `Place panel did not render; pausing ${backoffMs / 1000}s before retry ${attempts + 1} of 2 for detail ${index + 1} of ${state.records.length}…`;
     await saveRun(state);
-    location.reload();
+    await delay(backoffMs, signal);
+    if (!(await waitForBudget(state, 'details', signal))) return;
+    const alternate = record.g_place_id && attempts === 0
+      ? `https://www.google.com/maps/place/?q=place_id:${encodeURIComponent(record.g_place_id)}`
+      : record.g_maps_url;
+    if (alternate && alternate !== location.href) location.assign(alternate);
+    else location.reload();
     return;
   }
 

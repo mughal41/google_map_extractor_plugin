@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Atlas — Export CSV</title>
+  <link rel="stylesheet" href="popup.css">
+  <style>
+    body { display: grid; place-items: center; min-height: 100vh; margin: 0; background: var(--bg); color: var(--text); font-family: var(--font); }
+    .card { width: min(440px, 90vw); padding: 24px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-pop); }
+    h1 { font-size: 18px; margin: 0 0 8px; }
+    p { margin: 0 0 16px; color: var(--text-2); line-height: 1.5; }
+    .row { display: flex; gap: 12px; align-items: center; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>Export CSV</h1>
+    <p id="status">Preparing your file…</p>
+    <div class="row">
+      <button id="download" class="primary" type="button" hidden><span id="download-label">Download again</span></button>
+      <span id="error" class="error"></span>
+    </div>
+  </main>
+  <script type="module" src="export.js"></script>
+</body>
+</html>

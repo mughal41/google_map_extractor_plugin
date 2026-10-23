@@ -2,3 +2,11 @@ node_modules/
 .idea/
 *.log
 preview.html
+headless/node_modules/
+headless/output/
+headless/places/download/
+headless/profile/
+headless/results/
+headless/config.json
+headless/fleet.json
+headless/test-config.json
